@@ -44,8 +44,8 @@
 //! * The concept uses a relatively high amount of RAM. But with the use of appropriate DMA and timers, the pulse train generation should not even require CPU processing.
 //!
 
-use core::ops::{BitAnd, BitAndAssign, BitOrAssign, Not, BitOr};
-use core::ops::Shl;
+use core::ops::{BitAnd, BitOrAssign, Not, BitOr};
+
 
 /// Level implementation, for crank, cam and TDC signaling
 #[derive(Eq, PartialEq, Clone, Copy, Debug)]
@@ -212,15 +212,9 @@ impl EngCfg {
             + Clone
             + Sized
             + BitOrAssign
-            + BitAndAssign
             + BitAnd<Output = T>
             + Not<Output = T>
-            + BitOr<Output = T>
-            + Eq
-            + PartialEq
-            + num::Zero
-            + num::One
-            + Shl<Output = T>,
+            + BitOr<Output = T>,
     {
         let mut idx_cam_edges = 0;
         let mut cam_lvl = self.cam.first_level;
