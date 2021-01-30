@@ -18,7 +18,9 @@
 //! of this crate is really to create crank/cam/tdc generators for ECU development purpose.
 //!
 //! Each array element is a bit field representing the current crank, cam, tdc state, at a precise
-//! position (the array index) in the engine cycle:
+//! position (the array index) in the engine cycle.
+//! 
+//! Here is the implementation done for `u8` in this crate:
 //!
 //! | Bit | Desc.     |
 //! |:----|-----------|
