@@ -12,7 +12,7 @@
 //!
 //! ## Technical information
 //!
-//! The pulse train buffer is an array of [`EngBit`] (generally u8, u16 or u32, depending on the GPIO register width) with length 7200. An array has been used
+//! The pulse train buffer is an array of integers (generally u8, u16 or u32, depending on the GPIO register width) with length 7200. An array has been used
 //! in order to be compatible with DMA (Direct Memory Access) mechanisms. The goal
 //! of this crate is really to create crank/cam/tdc generators for ECU development purpose.
 //!
@@ -44,82 +44,8 @@
 //! * The concept uses a relatively high amount of RAM. But with the use of appropriate DMA and timers, the pulse train generation should not even require CPU processing.
 //!
 
-use core::ops::{
-    BitAndAssign,
-    BitOrAssign,
-    Not,
-    BitAnd,
-};
-
-
-/// Pulse train bit manipulation
-///
-/// Defines function helpers and positions in the pulse train element of
-/// * camshaft signal
-/// * crankshaft signal
-/// * TDCs
-/// using masks.
-pub trait EngBit: Copy + Clone + Sized + BitOrAssign + BitAndAssign + BitAnd<Output=Self> + Not<Output=Self> + Eq + PartialEq + num::Zero {
-    /// Camshaft signal mask, indicates bit position in the pulse train element
-    const CAM_MSK: Self;
-    /// Crankshaft signal mask, indicates bit position in the pulse train element
-    const CRK_MSK: Self;
-    /// TDCs position (max 6, can be left as is when unused), indicates bit position in the pulse train element
-    const TDC_MSK: [Self; 6];
-
-    /// Set camshaft signal bit to `lvl`
-    fn set_cam_lvl(&mut self, lvl: Level) {
-        match lvl {
-            Level::High => *self |= Self::CAM_MSK,
-            Level::Low => *self &= !Self::CAM_MSK,
-        };
-    }
-
-    /// Check if camshaft signal is high
-    fn get_cam_lvl(&self) -> Level {
-        if *self & Self::CAM_MSK != Self::zero() {
-            Level::High
-        } else {
-            Level::Low
-        }
-    }
-
-    /// Set crankshaft signal bit to `lvl`
-    fn set_crk_lvl(&mut self, lvl: Level) {
-        match lvl {
-            Level::High => *self |= Self::CRK_MSK,
-            Level::Low => *self &= !Self::CRK_MSK,
-        }
-    }
-
-    /// Check if crankshaft signal is high
-    fn get_crk_lvl(&self) -> Level {
-        if *self & Self::CRK_MSK != Self::zero() {
-            Level::High
-        } else {
-            Level::Low
-        }
-    }
-
-    /// Set TDC for cylinder `tdc` signal bit to `lvl`
-    fn set_tdc_lvl(&mut self, cyl: usize, lvl: Level) {
-        match lvl {
-            Level::High => *self |= Self::TDC_MSK[cyl],
-            Level::Low => *self &= !Self::TDC_MSK[cyl],
-        }
-    }
-
-    /// Check if TDC for cylinder `tdc` signal is high
-    fn get_tdc_lvl(&self, cyl: usize) -> Level {
-        if *self & Self::TDC_MSK[cyl] != Self::zero() {
-            Level::High
-        } else {
-            Level::Low
-        }
-    }
-}
-
-
+use core::ops::{BitAnd, BitAndAssign, BitOrAssign, Not, BitOr};
+use core::ops::Shl;
 
 /// Level implementation, for crank, cam and TDC signaling
 #[derive(Eq, PartialEq, Clone, Copy, Debug)]
@@ -277,7 +203,22 @@ impl EngCfg {
     /// Returns:
     /// * Ok: generation has been achieved correctly
     /// * Err: the buffer has not the minimal required length
-    pub fn gen_pulse_train<T: EngBit>(&self, pt: &mut [T; 7200]) {
+    pub fn gen_pulse_train<T>(&self, pt: &mut [T; 7200], cam_pos: T, crk_pos: T, tdc_pos: [T; 6])
+    where
+        T: Copy
+            + Clone
+            + Sized
+            + BitOrAssign
+            + BitAndAssign
+            + BitAnd<Output = T>
+            + Not<Output = T>
+            + BitOr<Output = T>
+            + Eq
+            + PartialEq
+            + num::Zero
+            + num::One
+            + Shl<Output = T>,
+    {
         let mut idx_cam_edges = 0;
         let mut cam_lvl = self.cam.first_level;
 
@@ -286,7 +227,11 @@ impl EngCfg {
         let mut crk_lvl = self.crk.first_level();
 
         for (angle, val) in pt.iter_mut().enumerate() {
-            val.set_cam_lvl(cam_lvl);
+            *val = if cam_lvl == Level::High {
+                *val | (T::one() << cam_pos)
+            } else {
+                *val & !(T::one() << cam_pos)
+            };
             if idx_cam_edges < 20 {
                 if self.cam.ev_angles[idx_cam_edges] == angle as i16 {
                     cam_lvl = !cam_lvl;
@@ -294,7 +239,11 @@ impl EngCfg {
                 }
             }
 
-            val.set_crk_lvl(crk_lvl);
+            *val = if crk_lvl == Level::High {
+                *val | (T::one() << crk_pos)
+            } else {
+                *val & !(T::one() << crk_pos)
+            };
             if angle % ((crk_tooth_angle / 2) as usize) == 0 && angle != 0 {
                 if (angle % 3600) >= 3600 - angle_missing_teeth {
                     crk_lvl = !self.crk.first_level();
@@ -305,10 +254,10 @@ impl EngCfg {
         }
 
         let tdc_to_tdc = 7200 / self.nr_of_cyl.val();
-        pt[self.ref_to_tdc0 as usize].set_tdc_lvl(0, Level::High);
+        pt[self.ref_to_tdc0 as usize] |= T::one() << tdc_pos[0];
 
         for cyl in 1..self.nr_of_cyl.val() {
-            pt[self.ref_to_tdc0 as usize + (cyl * tdc_to_tdc)].set_tdc_lvl(cyl, Level::High);
+            pt[self.ref_to_tdc0 as usize + (cyl * tdc_to_tdc)] |= T::one() << tdc_pos[cyl];
         }
     }
 }
@@ -330,99 +279,92 @@ pub static CFGS: [EngCfg; 1] = [EngCfg {
 mod tests {
     use core::panic;
 
-    use crate::EngBit;
     use crate::Level;
     use crate::CFGS;
     use rstest::rstest;
-
-    impl EngBit for u8 {
-        const CAM_MSK: u8 = 0x01;
-        const CRK_MSK: u8 = 0x02;
-        const TDC_MSK: [u8; 6] = [0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
-    }
 
     #[rstest(
         angle,
         tdc,
         expected,
-        case(657, 0, Level::Low),
-        case(658, 0, Level::High),
-        case(659, 0, Level::Low),
-        case(1857, 1, Level::Low),
-        case(1858, 1, Level::High),
-        case(1859, 1, Level::Low),
-        case(3057, 2, Level::Low),
-        case(3058, 2, Level::High),
-        case(3059, 2, Level::Low),
-        case(4257, 3, Level::Low),
-        case(4258, 3, Level::High),
-        case(4259, 3, Level::Low),
-        case(5457, 4, Level::Low),
-        case(5458, 4, Level::High),
-        case(5459, 4, Level::Low),
-        case(6657, 5, Level::Low),
-        case(6658, 5, Level::High),
-        case(6659, 5, Level::Low)
+        case(657 , 0, false),
+        case(658 , 0, true),
+        case(659 , 0, false),
+        case(1857, 1, false),
+        case(1858, 1, true),
+        case(1859, 1, false),
+        case(3057, 2, false),
+        case(3058, 2, true),
+        case(3059, 2, false),
+        case(4257, 3, false),
+        case(4258, 3, true),
+        case(4259, 3, false),
+        case(5457, 4, false),
+        case(5458, 4, true),
+        case(5459, 4, false),
+        case(6657, 5, false),
+        case(6658, 5, true),
+        case(6659, 5, false)
     )]
-    fn tdc_test(angle: usize, tdc: usize, expected: Level) {
+    fn tdc_test(angle: usize, tdc: usize, expected: bool) {
         let mut pls = [0u8; 7200];
 
-        CFGS[0].gen_pulse_train(&mut pls);
-        assert_eq!(expected, pls[angle].get_tdc_lvl(tdc))
+        CFGS[0].gen_pulse_train(&mut pls, 0, 1, [2, 3, 4, 5, 6, 7]);
+        assert_eq!(expected, pls[angle] & (1 << (tdc+2)) != 0)
     }
 
     #[rstest(
         angle,
         expected,
-        case(0, Level::High),
-        case(1, Level::High),
-        case(290, Level::Low),
-        case(388, Level::Low),
-        case(390, Level::High),
-        case(1190, Level::Low),
-        case(1288, Level::Low),
-        case(1290, Level::High),
-        case(1490, Level::Low),
-        case(1590, Level::High),
-        case(2090, Level::Low),
-        case(2190, Level::High),
-        case(2690, Level::Low),
-        case(2790, Level::High),
-        case(3890, Level::Low),
-        case(3990, Level::High),
-        case(5090, Level::Low),
-        case(5190, Level::High),
-        case(5690, Level::Low),
-        case(5790, Level::High),
-        case(6290, Level::Low),
-        case(6390, Level::High),
-        case(6590, Level::Low),
-        case(6690, Level::High),
-        case(7199, Level::High)
+        case(0   , true),
+        case(1   , true),
+        case(290 , false),
+        case(388 , false),
+        case(390 , true),
+        case(1190, false),
+        case(1288, false),
+        case(1290, true),
+        case(1490, false),
+        case(1590, true),
+        case(2090, false),
+        case(2190, true),
+        case(2690, false),
+        case(2790, true),
+        case(3890, false),
+        case(3990, true),
+        case(5090, false),
+        case(5190, true),
+        case(5690, false),
+        case(5790, true),
+        case(6290, false),
+        case(6390, true),
+        case(6590, false),
+        case(6690, true),
+        case(7199, true)
     )]
-    fn cam_test(angle: usize, expected: Level) {
+    fn cam_test(angle: usize, expected: bool) {
         let mut pls = [0u8; 7200];
 
-        CFGS[0].gen_pulse_train(&mut pls);
-        assert_eq!(expected, pls[angle].get_cam_lvl())
+        CFGS[0].gen_pulse_train(&mut pls, 0, 1, [2, 3, 4, 5, 6, 7]);
+        assert_eq!(expected, pls[angle] & 1 != 0)
     }
 
     #[rstest(
         angle,
         expected,
-        case(3449, Level::Low),
-        case(3481, Level::High),
-        case(3599, Level::High),
-        case(3601, Level::Low),
-        case(7049, Level::Low),
-        case(7081, Level::High),
-        case(7199, Level::High),
-        case(0, Level::Low)
+        case(3449, false),
+        case(3481, true),
+        case(3599, true),
+        case(3601, false),
+        case(7049, false),
+        case(7081, true),
+        case(7199, true),
+        case(0, false)
     )]
-    fn crk_gap_test(angle: usize, expected: Level) {
+    fn crk_gap_test(angle: usize, expected: bool) {
         let mut pls = [0u8; 7200];
 
-        CFGS[0].gen_pulse_train(&mut pls);
-        assert_eq!(expected, pls[angle].get_crk_lvl());
+        CFGS[0].gen_pulse_train(&mut pls, 0, 1, [2, 3, 4, 5, 6, 7]);
+        assert_eq!(expected, pls[angle] & 2 != 0);
     }
 }
