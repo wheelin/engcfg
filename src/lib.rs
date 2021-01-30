@@ -1,5 +1,4 @@
 #![cfg_attr(not(test), no_std)]
-
 //! # EngCfg
 //!
 //! ## Introduction
@@ -45,6 +44,14 @@
 //! * The concept uses a relatively high amount of RAM. But with the use of appropriate DMA and timers, the pulse train generation should not even require CPU processing.
 //!
 
+use core::ops::{
+    BitAndAssign,
+    BitOrAssign,
+    Not,
+    BitAnd,
+};
+
+
 /// Pulse train bit manipulation
 ///
 /// Defines function helpers and positions in the pulse train element of
@@ -52,7 +59,7 @@
 /// * crankshaft signal
 /// * TDCs
 /// using masks.
-pub trait EngBit: Sized {
+pub trait EngBit: Copy + Clone + Sized + BitOrAssign + BitAndAssign + BitAnd<Output=Self> + Not<Output=Self> + Eq + PartialEq + num::Zero {
     /// Camshaft signal mask, indicates bit position in the pulse train element
     const CAM_MSK: Self;
     /// Crankshaft signal mask, indicates bit position in the pulse train element
@@ -61,71 +68,58 @@ pub trait EngBit: Sized {
     const TDC_MSK: [Self; 6];
 
     /// Set camshaft signal bit to `lvl`
-    fn set_cam_lvl(&mut self, lvl: Level);
-    /// Check if camshaft signal is high
-    fn get_cam_lvl(&self) -> Level;
-
-    /// Set crankshaft signal bit to `lvl`
-    fn set_crk_lvl(&mut self, lvl: Level);
-    /// Check if crankshaft signal is high
-    fn get_crk_lvl(&self) -> Level;
-
-    /// Set TDC for cylinder `tdc` signal bit to `lvl`
-    fn set_tdc_lvl(&mut self, cyl: usize, lvl: Level);
-    /// Check if TDC for cylinder `tdc` signal is high
-    fn get_tdc_lvl(&self, cyl: usize) -> Level;
-}
-
-impl EngBit for u8 {
     fn set_cam_lvl(&mut self, lvl: Level) {
         match lvl {
-            Level::Low => *self &= !Self::CAM_MSK,
             Level::High => *self |= Self::CAM_MSK,
+            Level::Low => *self &= !Self::CAM_MSK,
         };
     }
 
+    /// Check if camshaft signal is high
     fn get_cam_lvl(&self) -> Level {
-        if self & Self::CAM_MSK != 0 {
+        if *self & Self::CAM_MSK != Self::zero() {
             Level::High
         } else {
             Level::Low
         }
     }
 
+    /// Set crankshaft signal bit to `lvl`
     fn set_crk_lvl(&mut self, lvl: Level) {
         match lvl {
-            Level::Low => *self &= !Self::CRK_MSK,
             Level::High => *self |= Self::CRK_MSK,
-        };
+            Level::Low => *self &= !Self::CRK_MSK,
+        }
     }
 
-    fn set_tdc_lvl(&mut self, tdc: usize, lvl: Level) {
-        match lvl {
-            Level::Low => *self &= !Self::TDC_MSK[tdc],
-            Level::High => *self |= Self::TDC_MSK[tdc],
-        };
-    }
-
-    const CAM_MSK: u8 = 0x01;
-    const CRK_MSK: u8 = 0x02;
-    const TDC_MSK: [u8; 6] = [0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
-
+    /// Check if crankshaft signal is high
     fn get_crk_lvl(&self) -> Level {
-        if self & Self::CRK_MSK != 0 {
+        if *self & Self::CRK_MSK != Self::zero() {
             Level::High
         } else {
             Level::Low
         }
     }
 
+    /// Set TDC for cylinder `tdc` signal bit to `lvl`
+    fn set_tdc_lvl(&mut self, cyl: usize, lvl: Level) {
+        match lvl {
+            Level::High => *self |= Self::TDC_MSK[cyl],
+            Level::Low => *self &= !Self::TDC_MSK[cyl],
+        }
+    }
+
+    /// Check if TDC for cylinder `tdc` signal is high
     fn get_tdc_lvl(&self, cyl: usize) -> Level {
-        if self & Self::TDC_MSK[cyl] != 0 {
+        if *self & Self::TDC_MSK[cyl] != Self::zero() {
             Level::High
         } else {
             Level::Low
         }
     }
 }
+
+
 
 /// Level implementation, for crank, cam and TDC signaling
 #[derive(Eq, PartialEq, Clone, Copy, Debug)]
@@ -340,6 +334,12 @@ mod tests {
     use crate::Level;
     use crate::CFGS;
     use rstest::rstest;
+
+    impl EngBit for u8 {
+        const CAM_MSK: u8 = 0x01;
+        const CRK_MSK: u8 = 0x02;
+        const TDC_MSK: [u8; 6] = [0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
+    }
 
     #[rstest(
         angle,
