@@ -1,4 +1,136 @@
 #![cfg_attr(not(test), no_std)]
+
+//! # EngCfg
+//!
+//! ## Introduction
+//!
+//! This crate allows to generate 4-stroke engine waveforms for direct writing on GPIO as bit mask.
+//!
+//! The goal is to generate a pulse train with the following information:
+//! * crankshaft wheel signal
+//! * camshaft wheel signal
+//! * top-dead-center piston position for each cylinder.
+//!
+//! ## Technical information
+//!
+//! The pulse train buffer is an array of [`EngBit`] (generally u8, u16 or u32, depending on the GPIO register width) with length 7200. An array has been used
+//! in order to be compatible with DMA (Direct Memory Access) mechanisms. The goal
+//! of this crate is really to create crank/cam/tdc generators for ECU development purpose.
+//!
+//! Each array element is a bit field representing the current crank, cam, tdc state, at a precise
+//! position (the array index) in the engine cycle:
+//!
+//! | Bit | Desc.     |
+//! |:----|-----------|
+//! |0    | Camshaft  |
+//! |1    | Crankshaft|
+//! |2    | TDC cyl. 1|
+//! |3    | TDC cyl. 2|
+//! |4    | TDC cyl. 3|
+//! |5    | TDC cyl. 4|
+//! |6    | TDC cyl. 5|
+//! |7    | TDC cyl. 6|
+//!
+//! When generated, the pulse train array shall be applied on output pins using a strict timing:
+//! * either by using interrupts and an hardware timer, by writing each element of the array on the GPIO port one by one and restarting to 0 at the end.
+//! * or by using a DMA with circular configuration and timer triggering. This way, the CPU has really nothing to do but reconfigure the timer in case of engine speed changes.
+//!
+//! ## Limitations
+//!
+//! The following engines can not be generated at the moment:
+//! * Engines with more than 6 cylinders
+//! * Asymmetrical engines (TDCs are not spaced evenly)
+//! * The concept uses a relatively high amount of RAM. But with the use of appropriate DMA and timers, the pulse train generation should not even require CPU processing.
+//!
+
+/// Pulse train bit manipulation
+/// 
+/// Defines function helpers and positions in the pulse train element of
+/// * camshaft signal
+/// * crankshaft signal
+/// * TDCs
+/// using masks.
+pub trait EngBit: Sized {
+    /// Camshaft signal mask, indicates bit position in the pulse train element
+    const CAM_MSK: Self;
+    /// Crankshaft signal mask, indicates bit position in the pulse train element
+    const CRK_MSK: Self;
+    /// TDCs position (max 6, can be left as is when unused), indicates bit position in the pulse train element
+    const TDC_MSK: [Self; 6];
+
+    /// Set camshaft signal bit to `lvl`
+    fn set_cam_lvl(&mut self, lvl: Level);
+    /// Check if camshaft signal is high
+    fn cam_is_high(&self) -> bool;
+    /// Check if camshaft signal is low
+    fn cam_is_low(&self) -> bool;
+
+    /// Set crankshaft signal bit to `lvl`
+    fn set_crk_lvl(&mut self, lvl: Level);
+    /// Check if crankshaft signal is high
+    fn crk_is_high(&self) -> bool;
+    /// Check if crankshaft signal is low
+    fn crk_is_low(&self) -> bool;
+
+    /// Set TDC for cylinder `tdc` signal bit to `lvl`
+    fn set_tdc_lvl(&mut self, cyl: usize, lvl: Level);
+    /// Check if TDC for cylinder `tdc` signal is high
+    fn tdc_is_high(&self, cyl: usize) -> bool;
+    /// Check if TDC for cylinder `tdc` signal is low
+    fn tdc_is_low(&self, cyl: usize) -> bool;
+}
+
+impl EngBit for u8 {
+    fn set_cam_lvl(&mut self, lvl: Level) {
+        match lvl {
+            Level::Low => *self &= !Self::CAM_MSK,
+            Level::High => *self |= Self::CAM_MSK,
+        };
+    }
+    
+    fn cam_is_high(&self) -> bool {
+        self & Self::CAM_MSK != 0
+    }
+    
+    fn cam_is_low(&self) -> bool {
+        !self.cam_is_high()
+    }
+    
+    fn set_crk_lvl(&mut self, lvl: Level) {
+        match lvl {
+            Level::Low => *self &= !Self::CRK_MSK,
+            Level::High => *self |= Self::CRK_MSK,
+        };
+    }
+    
+    fn crk_is_high(&self) -> bool {
+        self & Self::CRK_MSK != 0
+    }
+    
+    fn crk_is_low(&self) -> bool {
+        !self.crk_is_high()
+    }
+    
+    fn set_tdc_lvl(&mut self, tdc: usize, lvl: Level) {
+        match lvl {
+            Level::Low => *self &= !Self::TDC_MSK[tdc],
+            Level::High => *self |= Self::TDC_MSK[tdc],
+        };
+    }
+
+    fn tdc_is_high(&self, tdc: usize) -> bool {
+        self & Self::TDC_MSK[tdc] != 0
+    }
+    
+    fn tdc_is_low(&self, tdc: usize) -> bool {
+        !self.tdc_is_high(tdc)
+    }
+
+    const CAM_MSK: u8 = 0x01;
+    const CRK_MSK: u8 = 0x02;
+    const TDC_MSK: [u8; 6] = [0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
+}
+
 /// Level implementation, for crank, cam and TDC signaling
 #[derive(Eq, PartialEq, Clone, Copy)]
 pub enum Level {
@@ -27,6 +159,7 @@ pub enum CylNr {
 }
 
 impl CylNr {
+    /// Enum conversion into real cylinder number
     pub const fn val(&self) -> usize {
         match *self {
             CylNr::Cyl4 => 4,
@@ -37,22 +170,33 @@ impl CylNr {
 
 /// Type of crankshaft
 pub enum CrkType {
+    /// 30 teeth, 1 missing, gap level is low
     Crk30m1,
+    /// 30 teeth, 2 missing, gap level is low
     Crk30m2,
+    /// 60 teeth, 1 missing, gap level is low
     Crk60m1,
+    /// 60 teeth, 1 missing, gap level is low
     Crk60m2,
+    /// 120 teeth, 1 missing, gap level is low
     Crk120m1,
+    /// 120 teeth, 2 missing, gap level is low
     Crk120m2,
+    /// 30 teeth, 1 missing, gap level is high
     Crk30m1Inv,
+    /// 30 teeth, 2 missing, gap level is high
     Crk30m2Inv,
+    /// 60 teeth, 1 missing, gap level is high
     Crk60m1Inv,
+    /// 60 teeth, 2 missing, gap level is high
     Crk60m2Inv,
+    /// 120 teeth, 1 missing, gap level is high
     Crk120m1Inv,
+    /// 120 teeth, 2 missing, gap level is high
     Crk120m2Inv,
 }
 
 impl CrkType {
-
     /// Returns the number of teeth for the current wheel
     pub const fn nr_of_teeth(&self) -> usize {
         match *self {
@@ -119,9 +263,9 @@ impl CrkType {
 /// Camshaft wheel configuration
 pub struct Cam {
     /// Level when first crankshaft gap is met
-    first_level: Level,
-    /// Angle of each camshaft edge, starting from the first crankshaft gap
-    ev_angles: [i16; 20],
+    pub first_level: Level,
+    /// Angle of each camshaft edge, starting from the first crankshaft gap, DEG_I16_DEC1. Negative angle if not used.
+    pub ev_angles: [i16; 20],
 }
 
 /// Engine configuration
@@ -142,9 +286,8 @@ impl EngCfg {
     ///
     /// Returns:
     /// * Ok: generation has been achieved correctly
-    /// * Err: the buffer has not the minimal required lenght
-    pub fn gen_pulse_train(&self, pt: &mut [u8;7200]) {
-
+    /// * Err: the buffer has not the minimal required length
+    pub fn gen_pulse_train<T:EngBit>(&self, pt: &mut [T; 7200]) {
         let mut idx_cam_edges = 0;
         let mut cam_lvl = self.cam.first_level;
 
@@ -169,14 +312,13 @@ impl EngCfg {
                     crk_lvl = !crk_lvl;
                 }
             }
-
         }
-        
+
         let tdc_to_tdc = 7200 / self.nr_of_cyl.val();
-        pt[self.ref_to_tdc0 as usize] |= TDC_MSK[0];
+        pt[self.ref_to_tdc0 as usize].set_tdc_lvl(0, Level::High);
 
         for cyl in 1..self.nr_of_cyl.val() {
-            pt[self.ref_to_tdc0 as usize + (cyl * tdc_to_tdc)] |= TDC_MSK[cyl];
+            pt[self.ref_to_tdc0 as usize + (cyl * tdc_to_tdc)].set_tdc_lvl(cyl, Level::High);
         }
     }
 }
@@ -194,84 +336,21 @@ pub static CFGS: [EngCfg; 1] = [EngCfg {
     nr_of_cyl: CylNr::Cyl6,
 }];
 
-trait EngBit {
-    fn set_cam_lvl(&mut self, lvl: Level);
-    fn cam_is_high(&self) -> bool;
-    fn cam_is_low(&self) -> bool;
-
-    fn set_crk_lvl(&mut self, lvl: Level);
-    fn crk_is_high(&self) -> bool;
-    fn crk_is_low(&self) -> bool;
-
-    fn set_tdc_lvl(&mut self, tdc: usize, lvl: Level);
-    fn tdc_is_high(&self, tdc: usize) -> bool;
-    fn tdc_is_low(&self, tdc: usize) -> bool;
-}
-
-const CAM_MSK: u8 = 0x01;
-const CRK_MSK: u8 = 0x02;
-const TDC_MSK: [u8; 6] = [0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
-
-impl EngBit for u8 {
-    fn cam_is_high(&self) -> bool {
-        self & CAM_MSK != 0
-    }
-
-    fn crk_is_high(&self) -> bool {
-        self & CRK_MSK != 0
-    }
-
-    fn tdc_is_high(&self, tdc: usize) -> bool {
-        self & TDC_MSK[tdc] != 0
-    }
-
-    fn set_cam_lvl(&mut self, lvl: Level) {
-        match lvl {
-            Level::Low => *self &= !CAM_MSK,
-            Level::High => *self |= CAM_MSK,
-        };
-    }
-
-    fn set_crk_lvl(&mut self, lvl: Level) {
-        match lvl {
-            Level::Low => *self &= !CRK_MSK,
-            Level::High => *self |= CRK_MSK,
-        };
-    }
-
-    fn set_tdc_lvl(&mut self, tdc: usize, lvl: Level) {
-        match lvl {
-            Level::Low => *self &= !TDC_MSK[tdc],
-            Level::High => *self |= TDC_MSK[tdc],
-        };
-    }
-
-    fn cam_is_low(&self) -> bool {
-        !self.cam_is_high()
-    }
-
-    fn crk_is_low(&self) -> bool {
-        !self.crk_is_high()
-    }
-
-    fn tdc_is_low(&self, tdc: usize) -> bool {
-        !self.tdc_is_high(tdc)
-    }
-}
-
-
 #[cfg(test)]
 mod tests {
     use core::panic;
 
-    use crate::CFGS;
     use crate::EngBit;
+    use crate::CFGS;
     use rstest::rstest;
 
-    #[rstest(angle, tdc, expected,
-        case(657 , 0, false),
-        case(658 , 0, true),
-        case(659 , 0, false),
+    #[rstest(
+        angle,
+        tdc,
+        expected,
+        case(657, 0, false),
+        case(658, 0, true),
+        case(659, 0, false),
         case(1857, 1, false),
         case(1858, 1, true),
         case(1859, 1, false),
@@ -295,12 +374,14 @@ mod tests {
         assert_eq!(expected, pls[angle].tdc_is_high(tdc))
     }
 
-    #[rstest(angle, expected,
-        case(0   , true),
-        case(1   , true),
-        case(290 , false),
-        case(388 , false),
-        case(390 , true),
+    #[rstest(
+        angle,
+        expected,
+        case(0, true),
+        case(1, true),
+        case(290, false),
+        case(388, false),
+        case(390, true),
         case(1190, false),
         case(1288, false),
         case(1290, true),
@@ -329,41 +410,22 @@ mod tests {
         assert_eq!(expected, pls[angle].cam_is_high())
     }
 
-    #[rstest(angle, expected,
+    #[rstest(
+        angle,
+        expected,
         case(3449, false),
         case(3481, true),
         case(3599, true),
         case(3601, false),
-
         case(7049, false),
         case(7081, true),
         case(7199, true),
-        case(0   , false),
+        case(0, false)
     )]
     fn crk_gap_test(angle: usize, expected: bool) {
         let mut pls = [0u8; 7200];
 
         CFGS[0].gen_pulse_train(&mut pls);
-        println!("0b{:b}", pls[angle]);
         assert_eq!(expected, pls[angle].crk_is_high());
-    }
-
-    #[test]
-    fn pr_all() {
-        let mut pls = [0u8; 7200];
-
-        CFGS[0].gen_pulse_train(&mut pls);
-        for idx in 0..300 {
-            println!("{:04}: 0b{:08b}", idx, pls[idx]);
-        }
-        println!("######################");
-        for idx in 3400..3800 {
-            println!("{:04}: 0b{:08b}", idx, pls[idx]);
-        }
-        println!("######################");
-        for idx in 7000..7199 {
-            println!("{:04}: 0b{:08b}", idx, pls[idx]);
-        }
-        panic!();
     }
 }
