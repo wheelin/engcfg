@@ -199,11 +199,14 @@ pub struct EngCfg {
 impl EngCfg {
     /// Arguments:
     /// * pt: output argument, pulse train generated from engine configuration for waveform generation
+    /// * cam_msk: bitmask indicating camshaft signal position in bitfield
+    /// * crk_msk: bitmask indicating crankshaft signal position in bitfield
+    /// * tdc_msk: bitmasks (starts with TDC0) indicating TDCs signal position in bitfield
     ///
     /// Returns:
     /// * Ok: generation has been achieved correctly
     /// * Err: the buffer has not the minimal required length
-    pub fn gen_pulse_train<T>(&self, pt: &mut [T; 7200], cam_pos: T, crk_pos: T, tdc_pos: [T; 6])
+    pub fn gen_pulse_train<T>(&self, pt: &mut [T; 7200], cam_msk: T, crk_msk: T, tdc_msk: [T; 6])
     where
         T: Copy
             + Clone
@@ -228,9 +231,9 @@ impl EngCfg {
 
         for (angle, val) in pt.iter_mut().enumerate() {
             *val = if cam_lvl == Level::High {
-                *val | (T::one() << cam_pos)
+                *val | cam_msk
             } else {
-                *val & !(T::one() << cam_pos)
+                *val & !cam_msk
             };
             if idx_cam_edges < 20 {
                 if self.cam.ev_angles[idx_cam_edges] == angle as i16 {
@@ -240,9 +243,9 @@ impl EngCfg {
             }
 
             *val = if crk_lvl == Level::High {
-                *val | (T::one() << crk_pos)
+                *val | crk_msk
             } else {
-                *val & !(T::one() << crk_pos)
+                *val & !crk_msk
             };
             if angle % ((crk_tooth_angle / 2) as usize) == 0 && angle != 0 {
                 if (angle % 3600) >= 3600 - angle_missing_teeth {
@@ -254,10 +257,10 @@ impl EngCfg {
         }
 
         let tdc_to_tdc = 7200 / self.nr_of_cyl.val();
-        pt[self.ref_to_tdc0 as usize] |= T::one() << tdc_pos[0];
+        pt[self.ref_to_tdc0 as usize] |= tdc_msk[0];
 
         for cyl in 1..self.nr_of_cyl.val() {
-            pt[self.ref_to_tdc0 as usize + (cyl * tdc_to_tdc)] |= T::one() << tdc_pos[cyl];
+            pt[self.ref_to_tdc0 as usize + (cyl * tdc_to_tdc)] |= tdc_msk[cyl];
         }
     }
 }
@@ -277,9 +280,6 @@ pub static CFGS: [EngCfg; 1] = [EngCfg {
 
 #[cfg(test)]
 mod tests {
-    use core::panic;
-
-    use crate::Level;
     use crate::CFGS;
     use rstest::rstest;
 
@@ -309,7 +309,7 @@ mod tests {
     fn tdc_test(angle: usize, tdc: usize, expected: bool) {
         let mut pls = [0u8; 7200];
 
-        CFGS[0].gen_pulse_train(&mut pls, 0, 1, [2, 3, 4, 5, 6, 7]);
+        CFGS[0].gen_pulse_train(&mut pls, 0x01, 0x02, [0x04, 0x08, 0x10, 0x20, 0x40, 0x80]);
         assert_eq!(expected, pls[angle] & (1 << (tdc+2)) != 0)
     }
 
@@ -345,7 +345,7 @@ mod tests {
     fn cam_test(angle: usize, expected: bool) {
         let mut pls = [0u8; 7200];
 
-        CFGS[0].gen_pulse_train(&mut pls, 0, 1, [2, 3, 4, 5, 6, 7]);
+        CFGS[0].gen_pulse_train(&mut pls, 0x01, 0x02, [0x04, 0x08, 0x10, 0x20, 0x40, 0x80]);
         assert_eq!(expected, pls[angle] & 1 != 0)
     }
 
@@ -364,7 +364,7 @@ mod tests {
     fn crk_gap_test(angle: usize, expected: bool) {
         let mut pls = [0u8; 7200];
 
-        CFGS[0].gen_pulse_train(&mut pls, 0, 1, [2, 3, 4, 5, 6, 7]);
+        CFGS[0].gen_pulse_train(&mut pls, 0x01, 0x02, [0x04, 0x08, 0x10, 0x20, 0x40, 0x80]);
         assert_eq!(expected, pls[angle] & 2 != 0);
     }
 }
